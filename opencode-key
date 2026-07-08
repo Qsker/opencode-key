@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+import json, os, sys, platform
+
+IS_WINDOWS = platform.system() == "Windows"
+CLEAR = "cls" if IS_WINDOWS else "clear"
+def get_providers():
+    if os.path.exists(AUTH):
+        with open(AUTH) as f:
+            d = json.load(f)
+        return sorted(d.keys())
+    return ["opencode-go"]
+
+# PROVIDERS is set after AUTH is defined (line 22)
+
+CONFIG_DIRS = [
+    os.path.expanduser("~/.config/opencode"),
+]
+if IS_WINDOWS:
+    CONFIG_DIRS.insert(0, os.path.join(os.environ.get("APPDATA", ""), "opencode"))
+
+def find_config():
+    for d in CONFIG_DIRS:
+        auth = os.path.join(d, "_data", "auth.json")
+        if os.path.exists(auth):
+            return d
+    return CONFIG_DIRS[0]
+
+CONFIG = find_config()
+AUTH = os.path.join(CONFIG, "_data", "auth.json")
+KEY_STORE = os.path.join(CONFIG, ".opencode-keys.json")
+
+os.makedirs(os.path.dirname(KEY_STORE), exist_ok=True)
+
+PROVIDERS = get_providers()
+
+def load_keys():
+    if os.path.exists(KEY_STORE):
+        with open(KEY_STORE) as f:
+            d = json.load(f)
+        # migrate old format: {"name": "sk-..."} -> {"opencode-go": {"name": "sk-..."}}
+        if d and not isinstance(next(iter(d.values())), dict):
+            new = {"opencode-go": d}
+            save_keys(new)
+            return new
+        return d
+    return {p: {} for p in PROVIDERS}
+
+def save_keys(d):
+    with open(KEY_STORE, 'w') as f:
+        json.dump(d, f, indent=2)
+
+def get_current_all():
+    if not os.path.exists(AUTH):
+        return {}
+    with open(AUTH) as f:
+        d = json.load(f)
+    return {p: d.get(p, {}).get('key', '') for p in PROVIDERS}
+
+def mask_key(k):
+    if len(k) <= 8:
+        return k
+    return k[:4] + '*' * (len(k) - 8) + k[-4:]
+
+def show_menu():
+    keys = load_keys()
+    cur = get_current_all()
+
+    # build flat list: (provider, name, key)
+    items = []
+    for p in PROVIDERS:
+        for name, key in keys.get(p, {}).items():
+            items.append((p, name, key))
+
+    os.system(CLEAR)
+    print("=" * 52)
+    print("  opencode Key Switcher")
+    print("=" * 52)
+    print()
+
+    for p in PROVIDERS:
+        active_key = cur.get(p, "")
+        pk = keys.get(p, {})
+        label = f"  [{p}]"
+        if pk:
+            active = [n for n, k in pk.items() if k == active_key]
+            if active:
+                label += f"  ► {active[0]}  {mask_key(active_key)}"
+            else:
+                label += f"  ({len(pk)} keys)"
+                if active_key:
+                    label += f"  [current: {mask_key(active_key)} (not in store)]"
+        else:
+            label += "  (no keys)"
+        print(label)
+    print()
+
+    if items:
+        print("  Select to switch:")
+        print()
+        for i, (p, name, key) in enumerate(items, 1):
+            marker = "►" if key == cur.get(p, "") else " "
+            cur_label = " (current)" if key == cur.get(p, "") else ""
+            print(f"    {marker} [{i:2}] {p:18} {name:15} {mask_key(key)}{cur_label}")
+        print()
+    else:
+        print("  No keys saved.")
+        print()
+        print("  Use [a] to add one.")
+        print()
+
+    print(f"    [a]  Add a key")
+    if items:
+        print(f"    [d]  Delete a key")
+    print(f"    [q]  Quit")
+    print()
+
+    choice = input("  Choice: ").strip().lower()
+
+    if choice == 'q':
+        return
+    elif choice == 'a':
+        # provider selection
+        print()
+        for i, p in enumerate(PROVIDERS, 1):
+            print(f"    [{i}] {p}")
+        print(f"    [n] New provider")
+        p_idx = input("\n  Provider (number or n): ").strip().lower()
+        if p_idx == 'n':
+            provider = input("  Provider name: ").strip()
+        elif p_idx.isdigit() and 1 <= int(p_idx) <= len(PROVIDERS):
+            provider = PROVIDERS[int(p_idx) - 1]
+        else:
+            show_menu()
+            return
+        name = input(f"  [{provider}] Name: ").strip()
+        key = input(f"  [{provider}] API Key: ").strip()
+        if name and key:
+            d = load_keys()
+            d.setdefault(provider, {})[name] = key
+            save_keys(d)
+            print(f"\n  ✅ Saved: {provider}:{name}")
+            input("  Press Enter to continue...")
+        show_menu()
+        return
+    elif choice == 'd' and items:
+        print()
+        for i, (p, name, key) in enumerate(items, 1):
+            print(f"    [{i}] {p}:{name}  {mask_key(key)}")
+        idx = input("\n  Delete which? (number): ").strip()
+        if idx.isdigit() and 1 <= int(idx) <= len(items):
+            p, name, _ = items[int(idx) - 1]
+            d = load_keys()
+            if name in d.get(p, {}):
+                del d[p][name]
+                save_keys(d)
+                print(f"\n  ✅ Deleted: {p}:{name}")
+                input("  Press Enter to continue...")
+        show_menu()
+        return
+    elif choice.isdigit() and items:
+        i = int(choice) - 1
+        if 0 <= i < len(items):
+            p, name, key = items[i]
+            if not os.path.exists(AUTH):
+                auth = {}
+            else:
+                with open(AUTH) as f:
+                    auth = json.load(f)
+            auth[p] = {"type": "api", "key": key}
+            with open(AUTH + '.bak', 'w') as f:
+                json.dump(auth, f, indent=2)
+            with open(AUTH, 'w') as f:
+                json.dump(auth, f, indent=2)
+            print(f"\n  ✅ Switched {p} to: {name}  ({mask_key(key)})")
+            print("  Restart opencode for the change to take effect.")
+            input("  Press Enter to continue...")
+        show_menu()
+    else:
+        show_menu()
+
+if __name__ == '__main__':
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1]
+        if cmd == 'add':
+            prov = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] in PROVIDERS else ""
+            remaining = sys.argv[3:] if prov else sys.argv[2:]
+            if len(remaining) != 2:
+                names = "|".join(PROVIDERS)
+                print(f"Usage: opencode-key add [{names}] <name> <api_key>")
+                sys.exit(1)
+            name, key = remaining[0], remaining[1]
+            if not prov:
+                prov = PROVIDERS[0]
+            d = load_keys()
+            d.setdefault(prov, {})[name] = key
+            save_keys(d)
+            print(f"Saved {prov}:{name}")
+        elif cmd == 'delete':
+            if len(sys.argv) != 3:
+                print("Usage: opencode-key delete <name>")
+                sys.exit(1)
+            name = sys.argv[2]
+            d = load_keys()
+            found = False
+            for p in PROVIDERS:
+                if name in d.get(p, {}):
+                    del d[p][name]
+                    found = True
+            if not found:
+                print(f"Not found: {name}")
+                sys.exit(1)
+            save_keys(d)
+            print(f"Deleted: {name}")
+        elif cmd == 'current':
+            cur = get_current_all()
+            for p in PROVIDERS:
+                k = cur.get(p, "")
+                if k:
+                    print(f"  {p:18} {mask_key(k)}")
+        elif cmd == 'list':
+            d = load_keys()
+            cur = get_current_all()
+            for p in PROVIDERS:
+                for name, key in sorted(d.get(p, {}).items()):
+                    marker = '*' if key == cur.get(p, "") else ' '
+                    print(f" {marker} {p:18} {name:15} {mask_key(key)}")
+        elif cmd in ('help', '--help', '-h'):
+            names = "|".join(PROVIDERS)
+            print("Usage: opencode-key [command]")
+            print("  (no args)      →  interactive menu")
+            print("  current        →  show current keys")
+            print("  list           →  list all keys")
+            print(f"  add [{names}] <name> <key>  →  save a key")
+            print("  delete <name>  →  remove a key")
+        else:
+            print(f"Unknown: {cmd}")
+            print("Run opencode-key with no args for interactive menu.")
+    else:
+        show_menu()
